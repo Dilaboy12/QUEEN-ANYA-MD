@@ -1,76 +1,209 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const pino = require('pino');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    Browsers
+} = require("@whiskeysockets/baileys");
 
-// ===== CONFIGURATION (මෙතනින් විස්තර වෙනස් කරගන්න) =====
-const OWNER_NUMBER = "94740534738"; // ඔයාගේ Phone Number එක (Country code එකත් එක්ක + නැතුව)
-const BOT_NAME = "queen Anya";
-const OWNER_NAME = "Dilshan Ashinsa";
-// ========================================================
+const P = require("pino");
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+
+const config = require("./config");
+const { commands } = require("./command");
+
+const app = express();
+
+app.get("/", (req, res) => {
+    res.send(`
+        <html>
+        <head>
+            <title>${config.BOT_NAME}</title>
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+        </head>
+        <body style="background:#080808;color:white;text-align:center;font-family:Arial;padding-top:80px">
+            <h1>🤖 ${config.BOT_NAME}</h1>
+            <h2>🟢 Bot Server Online</h2>
+            <p>Owner: ${config.OWNER_NAME}</p>
+        </body>
+        </html>
+    `);
+});
+
+app.get("/api/status", (req, res) => {
+    res.json({
+        bot: config.BOT_NAME,
+        owner: config.OWNER_NAME,
+        status: "online",
+        uptime: process.uptime(),
+        memory: process.memoryUsage().rss,
+        commands: commands.length
+    });
+});
+
+app.listen(config.PORT, () => {
+    console.log(`🌐 Server running on port ${config.PORT}`);
+});
 
 async function startBot() {
-    // Session State එක Save කරගැනීමට
-    const { state, saveCreds } = await useMultiFileAuthState('session');
+
+    console.log("🚀 Starting WhatsApp Bot...");
+
+    const sessionPath = path.join(__dirname, "sessions");
+
+    if (!fs.existsSync(sessionPath)) {
+        fs.mkdirSync(sessionPath, { recursive: true });
+    }
+
+    const {
+        state,
+        saveCreds
+    } = await useMultiFileAuthState(sessionPath);
 
     const sock = makeWASocket({
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: true,
-        auth: state
+        auth: state,
+
+        logger: P({
+            level: "silent"
+        }),
+
+        browser: Browsers.macOS("Chrome"),
+
+        printQRInTerminal: false,
+
+        syncFullHistory: false,
+
+        generateHighQualityLinkPreview: true
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-    // Connection Status Check කිරීම
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('සම්බන්ධතාවය බිඳ වැටුණා. නැවත උත්සාහ කරයි...', shouldReconnect);
+    sock.ev.on("connection.update", async (update) => {
+
+        const {
+            connection,
+            lastDisconnect
+        } = update;
+
+        if (connection === "open") {
+
+            console.log("");
+            console.log("╭────────────────────────────╮");
+            console.log("│      🤖 BOT CONNECTED       │");
+            console.log("├────────────────────────────┤");
+            console.log(`│ NAME   : ${config.BOT_NAME}`);
+            console.log(`│ OWNER  : ${config.OWNER_NAME}`);
+            console.log("│ STATUS : ONLINE 🟢");
+            console.log("╰────────────────────────────╯");
+            console.log("");
+
+        }
+
+        if (connection === "close") {
+
+            const shouldReconnect =
+                lastDisconnect?.error?.output?.statusCode !==
+                DisconnectReason.loggedOut;
+
+            console.log("❌ WhatsApp connection closed.");
+
             if (shouldReconnect) {
-                startBot();
+                console.log("🔄 Reconnecting...");
+                setTimeout(startBot, 5000);
+            } else {
+                console.log("🔐 Session logged out.");
             }
-        } else if (connection === 'open') {
-            console.log(`✅ ${BOT_NAME} සාර්ථකව WhatsApp සමඟ සම්බන්ධ වුණා!`);
         }
     });
 
-    // Messages Receive වෙන කොටස
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+
+        const msg = messages[0];
+
+        if (!msg || !msg.message) return;
+
         try {
-            const msg = messages[0];
-            if (!msg.message || msg.key.fromMe) return;
 
-            const from = msg.key.remoteJid;
-            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+            const jid = msg.key.remoteJid;
 
-            // .contact හෝ .highway Command එක දුන් විට vCard යැවීම
-            if (text.toLowerCase() === '.contact' || text.toLowerCase() === '.highway' || text.toLowerCase() === '.owner') {
-                
-                // vCard Structure එක නිර්මාණය කිරීම
-                const vcard = 'BEGIN:VCARD\n'
-                    + 'VERSION:3.0\n'
-                    + `FN:${OWNER_NAME}\n`
-                    + `ORG:${BOT_NAME};\n`
-                    + `TEL;type=CELL;type=VOICE;waid=${OWNER_NUMBER}:+${OWNER_NUMBER.slice(0, 2)} ${OWNER_NUMBER.slice(2, 4)} ${OWNER_NUMBER.slice(4, 7)} ${OWNER_NUMBER.slice(7)}\n`
-                    + 'END:VCARD';
+            if (!jid) return;
 
-                // Contact Message එක යැවීම
-                await sock.sendMessage(from, {
-                    contacts: {
-                        displayName: OWNER_NAME,
-                        contacts: [{ vcard }]
+            const messageType =
+                Object.keys(msg.message)[0];
+
+            let text = "";
+
+            if (messageType === "conversation") {
+                text = msg.message.conversation;
+            }
+
+            if (messageType === "extendedTextMessage") {
+                text =
+                    msg.message.extendedTextMessage.text;
+            }
+
+            if (!text) return;
+
+            if (!text.startsWith(config.PREFIX)) return;
+
+            const args = text
+                .slice(config.PREFIX.length)
+                .trim()
+                .split(/\s+/);
+
+            const commandName =
+                args.shift()?.toLowerCase();
+
+            if (!commandName) return;
+
+            const command = commands.find((cmd) => {
+
+                if (cmd.pattern instanceof RegExp) {
+                    return cmd.pattern.test(commandName);
+                }
+
+                return String(cmd.pattern)
+                    .toLowerCase() === commandName;
+            });
+
+            if (!command) return;
+
+            if (config.AUTO_READ) {
+                await sock.readMessages([msg.key]);
+            }
+
+            await command.handler(
+                sock,
+                msg,
+                {
+                    args,
+                    text,
+                    command: commandName,
+                    jid
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                "Command Error:",
+                error
+            );
+
+            try {
+                await sock.sendMessage(
+                    msg.key.remoteJid,
+                    {
+                        text:
+                            "❌ Command එක execute කරන්න බැරි වුණා."
                     }
-                });
-            }
-
-            // Simple Alive Check Command එකක්
-            if (text.toLowerCase() === '.ping' || text.toLowerCase() === '.alive') {
-                await sock.sendMessage(from, { text: `👋 ${BOT_NAME} සක්‍රියව පවතී!` });
-            }
-
-        } catch (err) {
-            console.error('Error handling message:', err);
+                );
+            } catch {}
         }
     });
 }
 
-startBot();
+startBot().catch((error) => {
+    console.error("❌ Bot startup error:", error);
+});
